@@ -1,0 +1,98 @@
+name: release
+
+on:
+  push:
+    tags:
+      - '*-peppla*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.os_arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os_arch:
+          - linux-arm64
+          - darwin-arm64
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build release tarball
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          chmod +x util/build-release-tarball.sh util/verify-release-artifact.sh
+          util/build-release-tarball.sh "$VERSION" "${{ matrix.os_arch }}"
+
+      - name: Verify artifact
+        run: |
+          util/verify-release-artifact.sh "${{ matrix.os_arch }}" bin
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: tarball-${{ matrix.os_arch }}
+          path: release/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download tarballs
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: tarball-*
+          merge-multiple: true
+
+      - name: Write checksums
+        run: |
+          mkdir -p release
+          cp artifacts/*.tar.gz release/
+          cd release
+          shasum -a 256 *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          NOTES_FILE="$(mktemp)"
+          cat >"$NOTES_FILE" <<EOF
+          Unofficial Percona Toolkit build tracking upstream \`3.x\`.
+
+          | Platform | Use case |
+          |----------|----------|
+          | \`linux-arm64\` | ARM64 Linux, Docker on Apple Silicon |
+          | \`darwin-arm64\` | macOS Apple Silicon |
+
+          **Not supported by Percona LLC.** Install Perl dependencies separately (see \`INSTALL\` in the tarball).
+
+          Tag: \`${TAG}\`
+          Commit: \`${{ github.sha }}\`
+          EOF
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "Percona Toolkit ${TAG} (unofficial)" \
+            --notes-file "$NOTES_FILE" \
+            release/*.tar.gz \
+            release/SHA256SUMS
